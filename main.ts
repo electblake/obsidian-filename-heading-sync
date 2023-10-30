@@ -33,6 +33,8 @@ interface FilenameHeadingSyncPluginSettings {
   newHeadingStyle: HeadingStyle;
   replaceStyle: boolean;
   underlineString: string;
+  keepFilenamePrefix: boolean;
+  filenamePrefixRegexRules: string[][];
 }
 
 const DEFAULT_SETTINGS: FilenameHeadingSyncPluginSettings = {
@@ -44,6 +46,11 @@ const DEFAULT_SETTINGS: FilenameHeadingSyncPluginSettings = {
   newHeadingStyle: HeadingStyle.Prefix,
   replaceStyle: false,
   underlineString: '===',
+  keepFilenamePrefix: false,
+  filenamePrefixRegexRules: [
+    ['timestamp', '/^[0-9]{12}\s/', '202310241202 My Unique Note'],
+    ['zk', '/^[A-Za-z0-9]+\s-\s/', 'work1a3ba3 - My Work Note'] 
+  ],
 };
 
 export default class FilenameHeadingSyncPlugin extends Plugin {
@@ -171,13 +178,29 @@ export default class FilenameHeadingSyncPlugin extends Plugin {
       const heading = this.findHeading(lines, start);
 
       if (heading === null) return; // no heading found, nothing to do here
+      
+      let sanitizedHeading = this.sanitizeHeading(heading.text);
+      
+      // If Keep Filename Prefixes is enabled, check if the prefix is already in the heading and add if not
+      if (this.settings.keepFilenamePrefix) {
+        const prefix = this.getFilenamePrefix(file)
+        // check if prefix is already in heading
+        if (!sanitizedHeading.startsWith(prefix)) {
+          sanitizedHeading = prefix + sanitizedHeading
+        }
+      }
 
-      const sanitizedHeading = this.sanitizeHeading(heading.text);
       if (
         sanitizedHeading.length > 0 &&
+        this.sanitizeHeading(file.basename).length > 0 &&
         this.sanitizeHeading(file.basename) !== sanitizedHeading
       ) {
         const newPath = `${file.parent.path}/${sanitizedHeading}.md`;
+        // check if new filename is just going to be empty title with prefix
+        if (this.settings.keepFilenamePrefix && sanitizedHeading === this.getFilenamePrefix(file)) {
+          // just bail
+          return;
+        }
         this.isRenameInProgress = true;
         await this.app.fileManager.renameFile(file, newPath);
         this.isRenameInProgress = false;
@@ -227,13 +250,17 @@ export default class FilenameHeadingSyncPlugin extends Plugin {
   }
 
   forceSyncFilenameToHeading(file: TFile) {
-    const sanitizedHeading = this.sanitizeHeading(file.basename);
+    const prefix = this.getFilenamePrefix(file)
+    let sanitizedHeading = this.sanitizeHeading(file.basename)
+    if (this.settings.keepFilenamePrefix) {
+      sanitizedHeading = sanitizedHeading.replace(prefix, '');
+    }
     this.app.vault.read(file).then((data) => {
       const lines = data.split('\n');
       const start = this.findNoteStart(lines);
       const heading = this.findHeading(lines, start);
 
-      if (heading !== null) {
+      if (heading !== null && sanitizedHeading.length > 0) {
         if (this.sanitizeHeading(heading.text) !== sanitizedHeading) {
           this.replaceHeading(
             file,
@@ -243,7 +270,9 @@ export default class FilenameHeadingSyncPlugin extends Plugin {
             sanitizedHeading,
           );
         }
-      } else this.insertHeading(file, lines, start, sanitizedHeading);
+      } else if (sanitizedHeading.length > 0) {
+        this.insertHeading(file, lines, start, sanitizedHeading);
+      }
     });
   }
 
@@ -301,6 +330,42 @@ export default class FilenameHeadingSyncPlugin extends Plugin {
 
   regExpEscape(str: string): string {
     return String(str).replace(/[\\^$*+?.()|[\]{}]/g, '\\$&');
+  }
+
+  /**
+   * Gets the prefix of a file, if any.
+   * 
+   * @param {TFile} file the file to get the prefix from
+   * @returns {string} prefix of the file, or an empty string if no prefix is found
+   */
+  getFilenamePrefix(file: TFile): string {
+    // const prefixOptions = [
+    //   ['timestamp', new RegExp(/^[0-9]+\s/)],
+    //   ['zk', new RegExp(/^.*\s-\s/)]
+    // ];
+    const prefixOptions = this.settings.filenamePrefixRegexRules
+
+    if (!this.settings.keepFilenamePrefix) {
+      return '';
+    }
+
+    const filename = file.basename;
+
+    for (const option of prefixOptions) {
+      const [nameString, regexString] = option;
+      const name = nameString.trim();
+      const regex = new RegExp(regexString);
+      const matches = filename.match(regex)
+      if (matches && matches[0]) {
+        console.log('getFilenamePrefix', name, 'matched:', matches);
+        return matches[0];
+      } else {
+        console.log('getFilenamePrefix', name, 'no match with', regex);
+      }
+    }
+    
+    // no prefix found
+    return '';
   }
 
   sanitizeHeading(text: string) {
@@ -667,6 +732,116 @@ class FilenameHeadingSyncSettingTab extends PluginSettingTab {
             await this.plugin.saveSettings();
           }),
       );
+    new Setting(containerEl)
+      .setName('Keep Filename Prefixes')
+      .setDesc(
+        'Unique Notes, ZettelKasten, and other note organization schemes use prefixes to keep notes in order. If you want to keep these prefixes in your filenames but NOT headings, enable this setting.',
+      )
+      .addToggle((toggle) =>
+        toggle
+          .setValue(this.plugin.settings.keepFilenamePrefix)
+          .onChange(async (value) => {
+            this.plugin.settings.keepFilenamePrefix = value;
+            await this.plugin.saveSettings();
+            this.display();
+          }),
+      );
+
+      if (this.plugin.settings.keepFilenamePrefix) {
+
+        const addNewRule = () => {
+          new Setting(containerEl)
+          .setName('Regex Rule').addText((text) =>
+            text
+              .setPlaceholder('Rule Name')
+              .onChange(async (value) => {
+                // this.plugin.settings.excluded = value;
+                // this.plugin.saveSettings();
+              })
+          )
+          .addText((text) => {
+            text
+              .setPlaceholder('/Regular Expression/')
+              .onChange(async (value) => {
+                //
+              })
+          })
+        }
+        containerEl.createEl('h2', { text: 'Filename Prefix Regex Rules' });
+        const desc = document.createDocumentFragment();
+        desc.append(
+          'Filename prefix regex rules to match your note naming convention(s).',
+        );
+
+        new Setting(containerEl).setDesc(desc);
+        
+        this.plugin.settings.filenamePrefixRegexRules.forEach((rule, index) => {
+          const [name, regex] = rule;
+          new Setting(containerEl)
+            .setName('Regex Rule').addText((text) => {
+              text.onChange(async (value) => {
+                // this.plugin.settings.excluded = value;
+                // this.plugin.saveSettings();
+              })
+
+              if (name && name.length > 0) {
+                text.setValue(name)
+              } else {
+                text.setPlaceholder('Rule Name')
+              }
+            })
+            .addText((text) => {
+              text
+                .onChange(async (value) => {
+                  //
+                })
+              if (regex && regex.length > 0) {
+                text.setValue(regex)
+              } else {
+                text.setPlaceholder('/Regular Expression/')
+              }
+            })
+            .addExtraButton((button) => {
+              button.setIcon('cross')
+              button.onClick(async () => {
+                this.plugin.settings.filenamePrefixRegexRules.splice(index, 1)
+                await this.plugin.saveSettings();
+                this.display();
+              })
+            })
+        })
+
+        new Setting(containerEl).addButton((button) => {
+          button.setButtonText('Add New Rule').onClick(async () => {
+            this.plugin.settings.filenamePrefixRegexRules.push(['', ''])
+            await this.plugin.saveSettings();
+            this.display();
+          })
+        })
+
+      // new Setting(containerEl)
+      //   .setName('Filename Prefix Regex Rules')
+      //   .setDesc(
+      //     'Ignore rule in RegEx format. All files listed below will get ignored by this plugin.',
+      //   )
+      //   .addText((text) =>
+      //     text
+      //       .setPlaceholder('MyFolder/.*')
+      //       .setValue(this.plugin.settings.filenamePrefixRegexRules)
+      //       .onChange(async (value) => {
+      //         try {
+      //           new RegExp(value);
+      //           this.plugin.settings.filenamePrefixRegexRules = value;
+      //         } catch {
+      //           this.plugin.settings.filenamePrefixRegexRules = '';
+      //         }
+
+      //         await this.plugin.saveSettings();
+      //         renderRegexIgnoredFiles(regexIgnoredFilesDiv);
+      //         this.display();
+      //       }),
+      //   );
+    }
 
     containerEl.createEl('h2', { text: 'Ignored Files By Regex' });
     containerEl.createEl('p', {
