@@ -34,7 +34,8 @@ interface FilenameHeadingSyncPluginSettings {
   replaceStyle: boolean;
   underlineString: string;
   keepFilenamePrefix: boolean;
-  filenamePrefixRegexRules: string[][];
+  filenamePrefixRegexRules: [string, string, boolean][];
+  filenamePrefixSaveHistory: boolean;
 }
 
 const DEFAULT_SETTINGS: FilenameHeadingSyncPluginSettings = {
@@ -48,9 +49,10 @@ const DEFAULT_SETTINGS: FilenameHeadingSyncPluginSettings = {
   underlineString: '===',
   keepFilenamePrefix: false,
   filenamePrefixRegexRules: [
-    ['timestamp', '/^[0-9]{12}\s/', '202310241202 My Unique Note'],
-    ['zk', '/^[A-Za-z0-9]+\s-\s/', 'work1a3ba3 - My Work Note'] 
+    ['timestamp', '^[0-9]{12}\\s*', false], // 202310241202 My Unique Note
+    ['zettelkasten', '^[A-Za-z0-9]+\\s+-\\s*', false] // work1a3ba3 - My Work Note 
   ],
+  filenamePrefixSaveHistory: false,
 };
 
 export default class FilenameHeadingSyncPlugin extends Plugin {
@@ -137,7 +139,7 @@ export default class FilenameHeadingSyncPlugin extends Plugin {
 
       const reg = new RegExp(this.settings.ignoreRegex);
       return reg.exec(path) !== null;
-    } catch {}
+    } catch { }
 
     return false;
   }
@@ -178,15 +180,15 @@ export default class FilenameHeadingSyncPlugin extends Plugin {
       const heading = this.findHeading(lines, start);
 
       if (heading === null) return; // no heading found, nothing to do here
-      
+
       let sanitizedHeading = this.sanitizeHeading(heading.text);
-      
+
       // If Keep Filename Prefixes is enabled, check if the prefix is already in the heading and add if not
       if (this.settings.keepFilenamePrefix) {
         const prefix = this.getFilenamePrefix(file)
         // check if prefix is already in heading
-        if (!sanitizedHeading.startsWith(prefix)) {
-          sanitizedHeading = prefix + sanitizedHeading
+        if (!sanitizedHeading.startsWith(prefix) && sanitizedHeading.length > 0) {
+          sanitizedHeading = `${prefix.trim()} ${sanitizedHeading.trim()}`
         }
       }
 
@@ -251,17 +253,15 @@ export default class FilenameHeadingSyncPlugin extends Plugin {
 
   forceSyncFilenameToHeading(file: TFile) {
     const prefix = this.getFilenamePrefix(file)
-    let sanitizedHeading = this.sanitizeHeading(file.basename)
-    if (this.settings.keepFilenamePrefix) {
-      sanitizedHeading = sanitizedHeading.replace(prefix, '');
-    }
+    const sanitizedHeading = this.sanitizeHeading(file.basename, prefix)
+
     this.app.vault.read(file).then((data) => {
       const lines = data.split('\n');
       const start = this.findNoteStart(lines);
       const heading = this.findHeading(lines, start);
 
       if (heading !== null && sanitizedHeading.length > 0) {
-        if (this.sanitizeHeading(heading.text) !== sanitizedHeading) {
+        if (this.sanitizeHeading(heading.text, prefix) !== sanitizedHeading) {
           this.replaceHeading(
             file,
             lines,
@@ -357,18 +357,18 @@ export default class FilenameHeadingSyncPlugin extends Plugin {
       const regex = new RegExp(regexString);
       const matches = filename.match(regex)
       if (matches && matches[0]) {
-        console.log('getFilenamePrefix', name, 'matched:', matches);
+        console.log('prefix matched!', name, regexString, filename, matches);
         return matches[0];
       } else {
-        console.log('getFilenamePrefix', name, 'no match with', regex);
+        console.log('prefix no match', name, regexString, filename);
       }
     }
-    
+
     // no prefix found
     return '';
   }
 
-  sanitizeHeading(text: string) {
+  sanitizeHeading(text: string, prefix?: string) {
     // stockIllegalSymbols is a regExp object, but userIllegalSymbols is a list of strings and therefore they are handled separately.
     text = text.replace(stockIllegalSymbols, '');
 
@@ -380,6 +380,13 @@ export default class FilenameHeadingSyncPlugin extends Plugin {
       'g',
     );
     text = text.replace(userIllegalSymbolsRegExp, '');
+
+    // if prefix protection is turned on, remove prefix from heading
+    if (this.settings.keepFilenamePrefix && prefix) {
+      text = text.replace(prefix, '');
+      console.log('sanitizeHeading', 'text', text)
+    }
+
     return text.trim();
   }
 
@@ -566,6 +573,9 @@ export default class FilenameHeadingSyncPlugin extends Plugin {
   }
 
   async saveSettings() {
+    // this.settings.filenamePrefixRegexRules = this.settings.filenamePrefixRegexRules.filter((rule) => {
+    //   return typeof rule[0] === 'string' && typeof rule[1] === 'string' && rule.length === 3
+    // })
     await this.saveData(this.settings);
   }
 }
@@ -590,6 +600,9 @@ class FilenameHeadingSyncSettingTab extends PluginSettingTab {
 
       if (this.plugin.settings.ignoreRegex === '') {
         return;
+      }
+      if (!this.plugin.settings.filenamePrefixRegexRules) {
+        this.plugin.settings.filenamePrefixRegexRules = []
       }
 
       try {
@@ -747,10 +760,10 @@ class FilenameHeadingSyncSettingTab extends PluginSettingTab {
           }),
       );
 
-      if (this.plugin.settings.keepFilenamePrefix) {
+    if (this.plugin.settings.keepFilenamePrefix) {
 
-        const addNewRule = () => {
-          new Setting(containerEl)
+      const addNewRule = () => {
+        new Setting(containerEl)
           .setName('Regex Rule').addText((text) =>
             text
               .setPlaceholder('Rule Name')
@@ -766,22 +779,25 @@ class FilenameHeadingSyncSettingTab extends PluginSettingTab {
                 //
               })
           })
-        }
-        containerEl.createEl('h2', { text: 'Filename Prefix Regex Rules' });
-        const desc = document.createDocumentFragment();
-        desc.append(
-          'Filename prefix regex rules to match your note naming convention(s).',
-        );
+      }
+      containerEl.createEl('h2', { text: 'Filename Prefix Regex Rules' });
+      const desc = document.createDocumentFragment();
+      desc.append(
+        'Filename prefix regex rules to match your note naming convention(s).',
+      );
 
-        new Setting(containerEl).setDesc(desc);
-        
+      new Setting(containerEl).setDesc(desc);
+      this.plugin.settings.filenamePrefixRegexRules = this.plugin.settings.filenamePrefixRegexRules || []
+      console.log('this.plugin.settings.filenamePrefixRegexRules', this.plugin.settings.filenamePrefixRegexRules)
+      if (this.plugin.settings.filenamePrefixRegexRules.length > 0) {
         this.plugin.settings.filenamePrefixRegexRules.forEach((rule, index) => {
-          const [name, regex] = rule;
+          const [name, regex, enabled] = rule;
           new Setting(containerEl)
-            .setName('Regex Rule').addText((text) => {
+            .setName('Regex Rule')
+            .addText((text) => {
               text.onChange(async (value) => {
-                // this.plugin.settings.excluded = value;
-                // this.plugin.saveSettings();
+                this.plugin.settings.filenamePrefixRegexRules[index][0] = value
+                this.plugin.saveSettings();
               })
 
               if (name && name.length > 0) {
@@ -801,6 +817,18 @@ class FilenameHeadingSyncSettingTab extends PluginSettingTab {
                 text.setPlaceholder('/Regular Expression/')
               }
             })
+            .addToggle((toggle) =>
+              toggle
+                .setValue(enabled)
+                .onChange(async (value) => {
+                  this.plugin.settings.filenamePrefixRegexRules[index] = [
+                    this.plugin.settings.filenamePrefixRegexRules[index][0],
+                    this.plugin.settings.filenamePrefixRegexRules[index][1],
+                    value
+                  ]
+                  await this.plugin.saveSettings();
+                }),
+            )
             .addExtraButton((button) => {
               button.setIcon('cross')
               button.onClick(async () => {
@@ -810,14 +838,22 @@ class FilenameHeadingSyncSettingTab extends PluginSettingTab {
               })
             })
         })
+      }
 
-        new Setting(containerEl).addButton((button) => {
-          button.setButtonText('Add New Rule').onClick(async () => {
-            this.plugin.settings.filenamePrefixRegexRules.push(['', ''])
-            await this.plugin.saveSettings();
-            this.display();
-          })
+      new Setting(containerEl).addButton((button) => {
+        button.setButtonText('Add New Rule').onClick(async () => {
+          this.plugin.settings.filenamePrefixRegexRules.push(['', '', true])
+          await this.plugin.saveSettings();
+          this.display();
         })
+      })
+      new Setting(containerEl).addButton((button) => {
+        button.setButtonText('Reset Defaults').onClick(async () => {
+          this.plugin.settings.filenamePrefixRegexRules = DEFAULT_SETTINGS.filenamePrefixRegexRules
+          await this.plugin.saveSettings();
+          this.display();
+        })
+      })
 
       // new Setting(containerEl)
       //   .setName('Filename Prefix Regex Rules')
