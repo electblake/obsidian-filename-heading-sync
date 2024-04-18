@@ -11,3 +11,8 @@ main.js
 *.js.map
 
 build/
+.vscode
+
+# obsidian vault
+data.json
+.DS_Store
